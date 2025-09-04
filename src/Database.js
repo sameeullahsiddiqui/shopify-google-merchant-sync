@@ -366,6 +366,8 @@ class Database {
     }
 
     async getProductsForFeed(filters = {}) {
+        debugger;
+
         let whereConditions = ['p.status = ?'];
         let params = ['active'];
 

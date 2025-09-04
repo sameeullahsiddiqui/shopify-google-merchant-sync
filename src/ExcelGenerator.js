@@ -96,14 +96,19 @@ class ExcelGenerator {
 
             console.log(`Feed generated successfully: ${filename} (${fileSizeKB}KB)`);
 
-            // Save export history
+            console.log('Attempting to save export history...');
             if (database) {
-                await database.saveExportHistory({
-                    filename,
-                    products_count: products.length,
-                    file_size: stats.size,
-                    filters
-                });
+                try {
+                    await database.saveExportHistory({
+                        filename,
+                        products_count: products.length,
+                        file_size: stats.size,
+                        filters
+                    });
+                    console.log('Export history saved successfully');
+                } catch (error) {
+                    console.error('Error saving export history:', error);
+                }
             }
 
             return {

@@ -132,9 +132,10 @@ app.get('/api/products/stats', async (req, res) => {
 app.post('/api/generate-excel', async (req, res) => {
     try {
         const { filters = {} } = req.body;
-        const result = await excelGenerator.generateFeed(filters);
+        const result = await excelGenerator.generateFeed(filters, database);
         res.json(result);
     } catch (error) {
+        console.error('Error generating Excel feed:', error);
         res.status(500).json({ error: error.message });
     }
 });
