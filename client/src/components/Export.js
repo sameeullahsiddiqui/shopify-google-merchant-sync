@@ -66,6 +66,9 @@ const Export = ({ showNotification }) => {
     const [exportDialogOpen, setExportDialogOpen] = useState(false);
     const [customLabelsDialogOpen, setCustomLabelsDialogOpen] = useState(false);
     const [lastExportLabels, setLastExportLabels] = useState(null);
+    const [viewDetailsDialog, setViewDetailsDialog] = useState(false);
+    const [selectedExport, setSelectedExport] = useState(null);
+
     const [filters, setFilters] = useState({
         vendor: '',
         productType: '',
@@ -91,8 +94,9 @@ const Export = ({ showNotification }) => {
         setLoading(true);
         try {
             // Load export history and metadata
-            const [productsData] = await Promise.all([
-                apiService.getProducts(1, 100, '') // Get sample for filters
+            const [productsData, exportHistoryData] = await Promise.all([
+                apiService.getProducts(1, 100, ''), // Get sample for filters
+                apiService.getExportHistory(20)
             ]);
 
             // Extract unique values for filters
@@ -102,27 +106,14 @@ const Export = ({ showNotification }) => {
             setVendors(uniqueVendors);
             setProductTypes(uniqueTypes);
 
-            // Mock export history (in real app, this would come from API)
-            setExportHistory([
-                {
-                    id: 1,
-                    filename: 'google_merchant_feed_2024-01-15_50247_products.xlsx',
-                    created_at: '2024-01-15T10:30:00Z',
-                    products_count: 50247,
-                    file_size: 12500000,
-                    status: 'completed',
-                    filters: { vendor: '', productType: '', includeOutOfStock: false }
-                },
-                {
-                    id: 2,
-                    filename: 'google_merchant_feed_2024-01-14_48932_products.xlsx',
-                    created_at: '2024-01-14T09:15:00Z',
-                    products_count: 48932,
-                    file_size: 11800000,
-                    status: 'completed',
-                    filters: { vendor: 'Brand A', productType: '', includeOutOfStock: false }
-                }
-            ]);
+            if (exportHistoryData.success) {
+                console.log('Loaded export history:', exportHistoryData.data);
+                setExportHistory(exportHistoryData.data || []);
+            } else {
+                console.error('Failed to load export history:', exportHistoryData.error);
+                setExportHistory([]);
+            }
+
         } catch (error) {
             showNotification(`Error loading export data: ${error.message}`, 'error');
         } finally {
@@ -149,7 +140,7 @@ const Export = ({ showNotification }) => {
             setExportHistory(prev => [{
                 id: Date.now(),
                 filename: result.filename,
-                created_at: new Date().toISOString(),
+                created_at: new Date().toLocaleString(),
                 products_count: result.productsCount,
                 file_size: result.fileSizeKB * 1024,
                 status: 'completed',
@@ -179,14 +170,33 @@ const Export = ({ showNotification }) => {
         }
     };
 
-    const handleDeleteFile = async (fileId) => {
+    const handleDeleteFile = async (filename) => {
+        if (!filename) {
+            showNotification('Invalid filename for deletion', 'error');
+            return;
+        }
+
+        // Show confirmation dialog
+        if (!window.confirm(`Are you sure you want to delete ${filename}?`)) {
+            return;
+        }
+
         try {
-            // Implementation for file deletion would go here
-            setExportHistory(prev => prev.filter(item => item.id !== fileId));
+            console.log('Deleting file:', filename);
+            await apiService.deleteExportFile(filename);
             showNotification('File deleted successfully', 'success');
+
+            // Reload export history after deletion
+            await loadExportData();
         } catch (error) {
+            console.error('Delete error:', error);
             showNotification(`Delete failed: ${error.message}`, 'error');
         }
+    };
+
+    const handleViewDetails = (exportItem) => {
+        setSelectedExport(exportItem);
+        setViewDetailsDialog(true);
     };
 
     const formatFileSize = (bytes) => {
@@ -623,14 +633,18 @@ const Export = ({ showNotification }) => {
                                                 </IconButton>
                                             </Tooltip>
                                             <Tooltip title="View Details">
-                                                <IconButton size="small" sx={{ mr: 1 }}>
+                                                <IconButton
+                                                    size="small"
+                                                    sx={{ mr: 1 }}
+                                                    onClick={() => handleViewDetails(item)}
+                                                >
                                                     <ViewIcon fontSize="small" />
                                                 </IconButton>
                                             </Tooltip>
                                             <Tooltip title="Delete">
                                                 <IconButton
                                                     size="small"
-                                                    onClick={() => handleDeleteFile(item.id)}
+                                                    onClick={() => handleDeleteFile(item.filename)}
                                                     color="error"
                                                 >
                                                     <DeleteIcon fontSize="small" />
@@ -894,6 +908,99 @@ const Export = ({ showNotification }) => {
                 </DialogContent>
                 <DialogActions>
                     <Button onClick={() => setCustomLabelsDialogOpen(false)}>
+                        Close
+                    </Button>
+                </DialogActions>
+            </Dialog>
+
+            {/* Export Details Dialog */}
+            <Dialog
+                open={viewDetailsDialog}
+                onClose={() => setViewDetailsDialog(false)}
+                maxWidth="md"
+                fullWidth
+            >
+                <DialogTitle>
+                    Export Details
+                </DialogTitle>
+                <DialogContent>
+                    {selectedExport && (
+                        <Box sx={{ pt: 1 }}>
+                            <Grid container spacing={2}>
+                                <Grid item xs={12} sm={6}>
+                                    <Typography variant="subtitle2" color="text.secondary">
+                                        Filename
+                                    </Typography>
+                                    <Typography variant="body1" sx={{ mb: 2 }}>
+                                        {selectedExport.filename}
+                                    </Typography>
+                                </Grid>
+                                <Grid item xs={12} sm={6}>
+                                    <Typography variant="subtitle2" color="text.secondary">
+                                        Created
+                                    </Typography>
+                                    <Typography variant="body1" sx={{ mb: 2 }}>
+                                        {formatDate(selectedExport.created_at)}
+                                    </Typography>
+                                </Grid>
+                                <Grid item xs={12} sm={6}>
+                                    <Typography variant="subtitle2" color="text.secondary">
+                                        Products Count
+                                    </Typography>
+                                    <Typography variant="body1" sx={{ mb: 2 }}>
+                                        {selectedExport.products_count?.toLocaleString()}
+                                    </Typography>
+                                </Grid>
+                                <Grid item xs={12} sm={6}>
+                                    <Typography variant="subtitle2" color="text.secondary">
+                                        File Size
+                                    </Typography>
+                                    <Typography variant="body1" sx={{ mb: 2 }}>
+                                        {formatFileSize(selectedExport.file_size)}
+                                    </Typography>
+                                </Grid>
+                                <Grid item xs={12}>
+                                    <Typography variant="subtitle2" color="text.secondary">
+                                        Applied Filters
+                                    </Typography>
+                                    <Paper variant="outlined" sx={{ p: 2, mt: 1, backgroundColor: 'grey.50' }}>
+                                        <Typography variant="body2" component="pre">
+                                            {JSON.stringify(selectedExport.filters || {}, null, 2)}
+                                        </Typography>
+                                    </Paper>
+                                </Grid>
+                                {selectedExport.customLabelsApplied && (
+                                    <Grid item xs={12}>
+                                        <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
+                                            Custom Labels Applied
+                                        </Typography>
+                                        <Chip
+                                            icon={<LabelIcon />}
+                                            label="Smart Labels Enabled"
+                                            color="primary"
+                                            onClick={() => {
+                                                setLastExportLabels(selectedExport.customLabelsApplied);
+                                                setCustomLabelsDialogOpen(true);
+                                                setViewDetailsDialog(false);
+                                            }}
+                                        />
+                                    </Grid>
+                                )}
+                            </Grid>
+                        </Box>
+                    )}
+                </DialogContent>
+                <DialogActions>
+                    {selectedExport && (
+                        <Button
+                            onClick={() => handleDownloadFile(selectedExport.filename)}
+                            startIcon={<DownloadIcon />}
+                            sx={{ mr: 'auto' }}
+                        >
+                            Download
+                        </Button>
+                    )}
+                    <Button onClick={() => setViewDetailsDialog(false)}>
                         Close
                     </Button>
                 </DialogActions>

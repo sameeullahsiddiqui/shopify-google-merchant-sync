@@ -21,6 +21,7 @@ class ExcelGenerator {
     async generateFeed(filters = {}, database) {
         try {
             console.log('Starting Google Merchant feed generation...');
+            const startTime = Date.now();
 
             // Get configuration including shop URL
             const config = await this.configManager.getConfig();
@@ -39,15 +40,13 @@ class ExcelGenerator {
             if (products.length === 0) {
                 throw new Error('No products found matching the specified filters');
             }
+            console.log('Analyzing products...');
+            const analysisStart = Date.now();
 
-            // Group products by base product to identify lowest-priced variants
             const productGroups = this.groupProductsByBaseProduct(products);
             const lowestVariantAnalysis = this.identifyLowestPricedVariants(productGroups);
-
-            // Analyze products for intelligent custom labels (Labels 1-4)
             const productAnalysis = this.analyzeProductsForLabels(products);
-            console.log('Product analysis completed for custom labeling');
-            console.log(`Lowest variant analysis: ${Object.keys(lowestVariantAnalysis).length} product groups analyzed`);
+            console.log(`Analysis completed in ${Date.now() - analysisStart}ms`);
 
             // Create Excel workbook
             const workbook = new ExcelJS.Workbook();
@@ -58,73 +57,62 @@ class ExcelGenerator {
             worksheet.columns = columns;
 
             // Style the header row
-            worksheet.getRow(1).font = { bold: true };
-            worksheet.getRow(1).fill = {
-                type: 'pattern',
-                pattern: 'solid',
-                fgColor: { argb: 'FFE0E0E0' }
-            };
+            this.styleHeaderRow(worksheet);
 
-            // Add data rows with custom labels
-            let rowIndex = 2;
-            for (const product of products) {
-                const row = this.formatProductForGoogleMerchant(
-                    product,
-                    productAnalysis,
-                    lowestVariantAnalysis,
-                    shopUrl);
-                worksheet.addRow(row);
+            const batchSize = 500; // Process 500 products at a time
+            const batches = Math.ceil(products.length / batchSize);
 
-                // Apply alternating row colors
-                if (rowIndex % 2 === 0) {
-                    worksheet.getRow(rowIndex).fill = {
-                        type: 'pattern',
-                        pattern: 'solid',
-                        fgColor: { argb: 'FFF8F8F8' }
-                    };
-                }
-                rowIndex++;
+            console.log(`Processing ${products.length} products in ${batches} batches...`);
+
+            for (let batchIndex = 0; batchIndex < batches; batchIndex++) {
+                const batchStart = batchIndex * batchSize;
+                const batchEnd = Math.min(batchStart + batchSize, products.length);
+                const batch = products.slice(batchStart, batchEnd);
+
+                const formattedRows = batch.map(product =>
+                    this.formatProductForGoogleMerchant(
+                        product,
+                        productAnalysis,
+                        lowestVariantAnalysis,
+                        shopUrl
+                    )
+                );
+
+                // Add all rows at once for this batch
+                worksheet.addRows(formattedRows);
+
+                // Apply styling to this batch
+                this.applyBatchStyling(worksheet, batchStart + 2, batchEnd + 1); // +2 for header row
             }
 
-            // Auto-fit columns
-            worksheet.columns.forEach(column => {
-                let maxLength = 0;
-                column.eachCell({ includeEmpty: false }, (cell) => {
-                    const columnLength = cell.value ? cell.value.toString().length : 10;
-                    if (columnLength > maxLength) {
-                        maxLength = columnLength;
-                    }
-                });
-                column.width = Math.min(maxLength + 2, 50); // Max width of 50
-            });
+            // Auto-fit columns (optimized)
+            this.optimizeColumnWidths(worksheet);
 
-            // Generate filename
+            // Generate filename and save
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0];
             const filename = `google_merchant_feed_${timestamp}_${products.length}_products.xlsx`;
             const filepath = path.join(this.exportsDir, filename);
 
-            // Save the file
+            console.log('Saving Excel file...');
             await workbook.xlsx.writeFile(filepath);
 
-            // Get file size
+            // Get file stats
             const stats = await fs.stat(filepath);
             const fileSizeKB = Math.round(stats.size / 1024);
 
-            console.log(`Feed generated successfully: ${filename} (${fileSizeKB}KB)`);
+            const totalTime = Date.now() - startTime;
+            console.log(`Feed generated successfully in ${totalTime}ms: ${filename} (${fileSizeKB}KB)`);
 
-            console.log('Attempting to save export history...');
-            if (database) {
-                try {
-                    await database.saveExportHistory({
-                        filename,
-                        products_count: products.length,
-                        file_size: stats.size,
-                        filters
-                    });
-                    console.log('Export history saved successfully');
-                } catch (error) {
-                    console.error('Error saving export history:', error);
-                }
+            // Save export history
+            try {
+                await database.saveExportHistory({
+                    filename,
+                    products_count: products.length,
+                    file_size: stats.size,
+                    filters
+                });
+            } catch (error) {
+                console.error('Error saving export history:', error);
             }
 
             return {
@@ -134,6 +122,7 @@ class ExcelGenerator {
                 productsCount: products.length,
                 fileSizeKB,
                 downloadUrl: `/api/download/${filename}`,
+                processingTimeMs: totalTime,
                 customLabelsApplied: this.getCustomLabelsStats(products, productAnalysis, lowestVariantAnalysis)
             };
 
@@ -141,6 +130,54 @@ class ExcelGenerator {
             console.error('Error generating Excel feed:', error);
             throw error;
         }
+    }
+
+    styleHeaderRow(worksheet) {
+        const headerRow = worksheet.getRow(1);
+        headerRow.font = { bold: true };
+        headerRow.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFE0E0E0' }
+        };
+    }
+
+    applyBatchStyling(worksheet, startRow, endRow) {
+        for (let rowIndex = startRow; rowIndex <= endRow; rowIndex++) {
+            if (rowIndex % 2 === 0) {
+                worksheet.getRow(rowIndex).fill = {
+                    type: 'pattern',
+                    pattern: 'solid',
+                    fgColor: { argb: 'FFF8F8F8' }
+                };
+            }
+        }
+    }
+
+    optimizeColumnWidths(worksheet) {
+        // Cache max lengths to avoid recalculating
+        const maxLengths = {};
+
+        worksheet.columns.forEach((column, index) => {
+            maxLengths[index] = 10; // minimum width
+        });
+
+        // Sample rows for width calculation instead of all rows
+        const sampleRows = Math.min(100, worksheet.rowCount);
+        for (let rowIndex = 1; rowIndex <= sampleRows; rowIndex++) {
+            const row = worksheet.getRow(rowIndex);
+            row.eachCell((cell, colNumber) => {
+                const columnLength = cell.value ? cell.value.toString().length : 0;
+                if (columnLength > maxLengths[colNumber - 1]) {
+                    maxLengths[colNumber - 1] = columnLength;
+                }
+            });
+        }
+
+        // Apply calculated widths
+        worksheet.columns.forEach((column, index) => {
+            column.width = Math.min(maxLengths[index] + 2, 50);
+        });
     }
 
     groupProductsByBaseProduct(products) {
@@ -235,19 +272,6 @@ class ExcelGenerator {
 
     formatProductForGoogleMerchant(product, analysis, lowestVariantAnalysis, shopUrl) {
 
-        if (Math.random() < 0.001) {
-            console.log('DEBUG: Product data structure:', {
-                shopify_id: product.shopify_id,
-                title: product.title,
-                handle: product.handle,
-                price: product.price,
-                compare_at_price: product.compare_at_price,
-                inventory_quantity: product.inventory_quantity,
-                vendor: product.vendor,
-                allFields: Object.keys(product)
-            });
-        }
-
         // Clean and format description
         const description = this.cleanDescription(product.body_html || product.title);
 
@@ -296,7 +320,7 @@ class ExcelGenerator {
 
         return {
             id: `${product.shopify_id}_${product.shopify_id}`, // product_id_variant_id format
-            title: this.truncateText(product.title, 150),
+            title: product.title || 'Untitled Product',
             description: this.truncateText(description, 5000),
             link: link,
             image_link: imageLink,
@@ -520,34 +544,73 @@ class ExcelGenerator {
     }
 
     analyzeProductsForLabels(products) {
-        const analysis = {
-            priceRanges: this.calculatePriceRanges(products),
-            vendorGroups: this.groupByVendor(products),
-            typeGroups: this.groupByProductType(products),
-            inventoryLevels: this.calculateInventoryLevels(products),
-            competitiveAnalysis: this.analyzeCompetitivePricing(products),
-            seasonalIndicators: this.detectSeasonalProducts(products)
-        };
+        console.log('Starting product analysis...');
 
-        console.log('Product analysis results:', {
-            totalProducts: products.length,
-            priceRanges: Object.keys(analysis.priceRanges).length,
-            vendors: Object.keys(analysis.vendorGroups).length,
-            types: Object.keys(analysis.typeGroups).length
+        // Use Map for better performance with large datasets
+        const vendorMap = new Map();
+        const typeMap = new Map();
+        const prices = [];
+        const inventoryLevels = [];
+
+        // Single pass through products to gather all data
+        products.forEach(product => {
+            const vendor = product.vendor || 'Unknown';
+            const type = product.product_type || 'Uncategorized';
+            const price = parseFloat(product.price) || 0;
+            const inventory = product.inventory_quantity || 0;
+
+            // Vendor analysis
+            if (!vendorMap.has(vendor)) {
+                vendorMap.set(vendor, { count: 0, totalPrice: 0, products: [] });
+            }
+            const vendorData = vendorMap.get(vendor);
+            vendorData.count++;
+            vendorData.totalPrice += price;
+            vendorData.products.push(product);
+
+            // Type analysis
+            if (!typeMap.has(type)) {
+                typeMap.set(type, { count: 0, totalPrice: 0 });
+            }
+            const typeData = typeMap.get(type);
+            typeData.count++;
+            typeData.totalPrice += price;
+
+            // Collect numeric data
+            if (price > 0) prices.push(price);
+            inventoryLevels.push(inventory);
         });
 
-        return analysis;
+        // Calculate averages
+        vendorMap.forEach(vendor => {
+            vendor.avgPrice = vendor.count > 0 ? vendor.totalPrice / vendor.count : 0;
+        });
+
+        typeMap.forEach(type => {
+            type.avgPrice = type.count > 0 ? type.totalPrice / type.count : 0;
+        });
+
+        // Convert Maps to Objects for compatibility
+        const vendorGroups = Object.fromEntries(vendorMap);
+        const typeGroups = Object.fromEntries(typeMap);
+
+        return {
+            priceRanges: this.calculatePriceRanges(prices),
+            vendorGroups,
+            typeGroups,
+            inventoryLevels: this.calculateInventoryLevels(inventoryLevels),
+            competitiveAnalysis: this.analyzeCompetitivePricing(products, vendorGroups, typeGroups),
+            seasonalIndicators: this.detectSeasonalProducts(products)
+        };
     }
 
-    calculatePriceRanges(products) {
-        const prices = products.map(p => parseFloat(p.price) || 0).filter(p => p > 0);
+    // 4. Optimized price range calculation
+    calculatePriceRanges(prices) {
         if (prices.length === 0) return {};
 
         const min = Math.min(...prices);
         const max = Math.max(...prices);
         const range = max - min;
-
-        // Create 5 price tiers
         const tierSize = range / 5;
 
         return {
@@ -603,14 +666,17 @@ class ExcelGenerator {
         return typeGroups;
     }
 
-    calculateInventoryLevels(products) {
-        const inventoryLevels = products.map(p => p.inventory_quantity || 0);
+    calculateInventoryLevels(inventoryLevels) {
         if (inventoryLevels.length === 0) return {};
 
-        const sortedInventory = inventoryLevels.sort((a, b) => a - b);
-        const q1 = sortedInventory[Math.floor(sortedInventory.length * 0.25)];
-        const q3 = sortedInventory[Math.floor(sortedInventory.length * 0.75)];
-        const median = sortedInventory[Math.floor(sortedInventory.length * 0.5)];
+        const sortedInventory = [...inventoryLevels].sort((a, b) => a - b);
+        const q1Index = Math.floor(sortedInventory.length * 0.25);
+        const q3Index = Math.floor(sortedInventory.length * 0.75);
+        const medianIndex = Math.floor(sortedInventory.length * 0.5);
+
+        const q1 = sortedInventory[q1Index];
+        const q3 = sortedInventory[q3Index];
+        const median = sortedInventory[medianIndex];
 
         return {
             low: { max: q1, label: 'Low Stock' },
@@ -812,57 +878,6 @@ class ExcelGenerator {
 
         return labels;
     }
-    getCustomLabelsStats(products, analysis, lowestVariantAnalysis) {
-        const stats = {
-            lowestVariants: {}, // Updated stats for Custom Label 0
-            competitivePositions: {},
-            inventoryLevels: {},
-            vendorCategories: {},
-            seasonalAttributes: {}
-        };
-
-        console.log('getCustomLabelsStats called with', products.length, 'products');
-
-        products.forEach(product => {
-            const labels = this.generateCustomLabels(product, analysis, lowestVariantAnalysis);
-
-            // Count lowest variant status (Custom Label 0)
-            if (labels.custom_label_0) {
-                stats.lowestVariants[labels.custom_label_0] = (stats.lowestVariants[labels.custom_label_0] || 0) + 1;
-            }
-
-            // Count competitive positions
-            if (labels.custom_label_1) {
-                stats.competitivePositions[labels.custom_label_1] = (stats.competitivePositions[labels.custom_label_1] || 0) + 1;
-            }
-
-            // Count inventory levels
-            if (labels.custom_label_2) {
-                stats.inventoryLevels[labels.custom_label_2] = (stats.inventoryLevels[labels.custom_label_2] || 0) + 1;
-            }
-
-            // Count vendor categories
-            if (labels.custom_label_3) {
-                stats.vendorCategories[labels.custom_label_3] = (stats.vendorCategories[labels.custom_label_3] || 0) + 1;
-            }
-
-            // Count seasonal attributes
-            if (labels.custom_label_4) {
-                stats.seasonalAttributes[labels.custom_label_4] = (stats.seasonalAttributes[labels.custom_label_4] || 0) + 1;
-            }
-        });
-
-        // Add summary logging
-        console.log('Custom Labels Statistics:', {
-            'Lowest Variants': stats.lowestVariants['Lowest_Variant'] || 0,
-            'Single Variants': stats.lowestVariants['Single_Variant'] || 0,
-            'Higher Variants': Object.entries(stats.lowestVariants)
-                .filter(([key]) => key.startsWith('Higher_Variant'))
-                .reduce((sum, [key, count]) => sum + count, 0)
-        });
-
-        return stats;
-    }
 
     capitalize(str) {
         return str.charAt(0).toUpperCase() + str.slice(1);
@@ -1038,9 +1053,14 @@ class ExcelGenerator {
         try {
             const filepath = path.join(this.exportsDir, filename);
             await fs.unlink(filepath);
+            console.log('File deleted from filesystem:', filename);
             return true;
         } catch (error) {
-            console.error('Error deleting export file:', error);
+            console.error('Error deleting export file from filesystem:', error);
+            if (error.code === 'ENOENT') {
+                console.log('File not found, considering as deleted:', filename);
+                return true; // File doesn't exist, so it's effectively "deleted"
+            }
             return false;
         }
     }

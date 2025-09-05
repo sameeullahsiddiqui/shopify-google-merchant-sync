@@ -164,6 +164,53 @@ app.get('/api/logs', async (req, res) => {
     }
 });
 
+app.get('/api/export-history', async (req, res) => {
+    try {
+        const { limit = 10 } = req.query;
+        console.log('Fetching export history with limit:', limit);
+
+        const history = await database.getExportHistory(parseInt(limit));
+        console.log('Found export history records:', history.length);
+
+        res.json({
+            success: true,
+            data: history,
+            count: history.length
+        });
+    } catch (error) {
+        console.error('Error fetching export history:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+app.delete('/api/export-history/:filename', async (req, res) => {
+    try {
+        const { filename } = req.params;
+
+        console.error('Deleting export file:', filename);
+
+        // Delete actual file
+        const success = await excelGenerator.deleteExportFile(filename);
+
+        // Delete from database
+        await database.runQuery('DELETE FROM export_history WHERE filename = ?', [filename]);
+
+        if (success) {
+            res.json({ success: true, message: 'File deleted successfully' });
+        } else {
+            res.status(404).json({ success: false, error: 'File not found' });
+        }
+    } catch (error) {
+        console.error('Error deleting export file:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+
+
 // Serve React app in production
 if (process.env.NODE_ENV === 'production') {
     app.use(express.static(path.join(__dirname, 'client/build')));

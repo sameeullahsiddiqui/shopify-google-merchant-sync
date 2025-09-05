@@ -114,6 +114,29 @@ class ApiService {
         }
     }
 
+    async getExportHistory(limit = 10) {
+        try {
+            const response = await this.client.get(`/api/export-history?limit=${limit}`, {
+                params: { limit }
+            });
+            return response.data;
+        } catch (error) {
+            this.handleError(error);
+        }
+    }
+
+    async deleteExportFile(filename) {
+        try {
+            const response = await this.client.delete(`/api/export-history/${filename}`, {
+                params: { filename }
+            });
+            return response.data;
+        } catch (error) {
+            this.handleError(error);
+        }
+    }
+
+
     // Product management
     async getProducts(page = 1, limit = 50, search = '') {
         try {
@@ -125,6 +148,7 @@ class ApiService {
             this.handleError(error);
         }
     }
+
 
     async getProductStats() {
         try {

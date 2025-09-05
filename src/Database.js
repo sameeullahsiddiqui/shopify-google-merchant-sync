@@ -366,19 +366,19 @@ class Database {
     }
 
     async getProductsForFeed(filters = {}) {
-        debugger;
-
         let whereConditions = ['p.status = ?'];
         let params = ['active'];
 
-        if (filters.vendor) {
-            whereConditions.push('p.vendor = ?');
-            params.push(filters.vendor);
+        if (filters.vendor && filters.vendor.length > 0) {
+            const placeholders = filters.vendor.map(() => '?').join(',');
+            whereConditions.push(`p.vendor IN (${placeholders})`);
+            params.push(...filters.vendor);
         }
 
-        if (filters.productType) {
-            whereConditions.push('p.product_type = ?');
-            params.push(filters.productType);
+        if (filters.productType && filters.productType.length > 0) {
+            const placeholders = filters.productType.map(() => '?').join(',');
+            whereConditions.push(`p.product_type IN (${placeholders})`);
+            params.push(...filters.productType);
         }
 
         if (filters.minPrice) {
@@ -391,37 +391,91 @@ class Database {
             params.push(filters.maxPrice);
         }
 
+        if (filters.includeOutOfStock === false) {
+            whereConditions.push('v.inventory_quantity > 0');
+        }
+
+        // Fixed query with proper field aliasing to avoid conflicts
         const query = `
-      SELECT
-        p.*,
-        v.*,
-        i.src as image_src,
-        i.alt as image_alt
-      FROM products p
-      INNER JOIN (
         SELECT
-          product_id,
-          MIN(price) as min_price,
-          shopify_id,
-          title,
-          price,
-          compare_at_price,
-          sku,
-          inventory_quantity,
-          barcode,
-          weight,
-          weight_unit
-        FROM variants
-        WHERE price > 0
-        GROUP BY product_id
-        HAVING price = min_price
-      ) v ON p.shopify_id = v.product_id
-      LEFT JOIN images i ON p.shopify_id = i.product_id AND i.position = 1
-      WHERE ${whereConditions.join(' AND ')}
-      ORDER BY p.title
+            -- Product fields (explicitly aliased to avoid conflicts)
+            p.shopify_id as product_shopify_id,
+            p.title as title,                    -- Product title (main title)
+            p.handle as handle,
+            p.body_html as body_html,
+            p.vendor as vendor,
+            p.product_type as product_type,
+            p.status as status,
+            p.tags as tags,
+            p.google_product_category as google_product_category,
+            p.brand as brand,
+
+            -- Variant fields (explicitly selected to avoid overwriting product fields)
+            v.shopify_id as variant_shopify_id,
+            v.shopify_id as shopify_id,          -- For compatibility with existing code
+            v.title as variant_title,            -- Variant title (size/color info)
+            v.price as price,
+            v.compare_at_price as compare_at_price,
+            v.sku as sku,
+            v.inventory_quantity as inventory_quantity,
+            v.barcode as barcode,
+            v.weight as weight,
+            v.weight_unit as weight_unit,
+            v.option1 as option1,
+            v.option2 as option2,
+            v.option3 as option3,
+
+            -- Image fields
+            i.src as image_src,
+            i.alt as image_alt
+        FROM products p
+        INNER JOIN (
+            SELECT
+                product_id,
+                MIN(price) as min_price,
+                shopify_id,
+                title,
+                price,
+                compare_at_price,
+                sku,
+                inventory_quantity,
+                barcode,
+                weight,
+                weight_unit,
+                option1,
+                option2,
+                option3
+            FROM variants
+            WHERE price > 0
+            GROUP BY product_id
+            HAVING price = min_price
+        ) v ON p.shopify_id = v.product_id
+        LEFT JOIN images i ON p.shopify_id = i.product_id AND i.position = 1
+        WHERE ${whereConditions.join(' AND ')}
+        ORDER BY p.title
     `;
 
-        return await this.allQuery(query, params);
+        try {
+            console.log('Executing getProductsForFeed query...');
+            const products = await this.allQuery(query, params);
+            console.log(`Found ${products.length} products for feed`);
+
+            // Log sample product to verify field mapping
+            if (products.length > 0) {
+                console.log('Sample product data:', {
+                    title: products[0].title,
+                    variant_title: products[0].variant_title,
+                    shopify_id: products[0].shopify_id,
+                    vendor: products[0].vendor,
+                    price: products[0].price
+                });
+            }
+
+            return products;
+        } catch (error) {
+            console.error('Error in getProductsForFeed:', error);
+            throw error;
+        }
     }
 
     async getShopDomain() {
@@ -506,6 +560,40 @@ class Database {
             exportData.file_size,
             JSON.stringify(exportData.filters)
         ]);
+    }
+
+    async getExportHistory(limit = 10) {
+        const query = `
+        SELECT
+            id,
+            filename,
+            products_count,
+            file_size,
+            filters,
+            created_at
+        FROM export_history
+        ORDER BY created_at DESC
+        LIMIT ?
+    `;
+
+        try {
+            console.log('Querying export history with limit:', limit);
+            const history = await this.allQuery(query, [limit]);
+
+            // Parse filters and add computed fields
+            const parsedHistory = history.map(record => ({
+                ...record,
+                filters: record.filters ? JSON.parse(record.filters) : {},
+                file_size_mb: (record.file_size / (1024 * 1024)).toFixed(2),
+                status: 'completed' // Since it's in the database, it was completed
+            }));
+
+            console.log(`Returning ${parsedHistory.length} export history records`);
+            return parsedHistory;
+        } catch (error) {
+            console.error('Error fetching export history from database:', error);
+            return [];
+        }
     }
 
     async close() {
