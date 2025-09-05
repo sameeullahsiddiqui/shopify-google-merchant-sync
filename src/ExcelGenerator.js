@@ -1,9 +1,11 @@
 const ExcelJS = require('exceljs');
 const path = require('path');
 const fs = require('fs').promises;
+const ConfigManager = require('./ConfigManager');
 
 class ExcelGenerator {
     constructor() {
+        this.configManager = new ConfigManager(); // Add this
         this.exportsDir = path.join(__dirname, '..', 'exports');
         this.ensureExportsDir();
     }
@@ -19,6 +21,16 @@ class ExcelGenerator {
     async generateFeed(filters = {}, database) {
         try {
             console.log('Starting Google Merchant feed generation...');
+
+            // Get configuration including shop URL
+            const config = await this.configManager.getConfig();
+            const shopUrl = config.shopUrl;
+
+            if (!shopUrl) {
+                throw new Error('Shop URL not configured. Please configure your shop URL in settings.');
+            }
+
+            console.log(`Using shop URL: ${shopUrl}`);
 
             // Get products from database with variant analysis
             const products = await database.getProductsForFeed(filters);
@@ -56,7 +68,11 @@ class ExcelGenerator {
             // Add data rows with custom labels
             let rowIndex = 2;
             for (const product of products) {
-                const row = this.formatProductForGoogleMerchant(product, productAnalysis, lowestVariantAnalysis);
+                const row = this.formatProductForGoogleMerchant(
+                    product,
+                    productAnalysis,
+                    lowestVariantAnalysis,
+                    shopUrl);
                 worksheet.addRow(row);
 
                 // Apply alternating row colors
@@ -217,20 +233,52 @@ class ExcelGenerator {
         return lowestVariantMap;
     }
 
-    formatProductForGoogleMerchant(product, analysis, lowestVariantAnalysis) {
+    formatProductForGoogleMerchant(product, analysis, lowestVariantAnalysis, shopUrl) {
+
+        if (Math.random() < 0.001) {
+            console.log('DEBUG: Product data structure:', {
+                shopify_id: product.shopify_id,
+                title: product.title,
+                handle: product.handle,
+                price: product.price,
+                compare_at_price: product.compare_at_price,
+                inventory_quantity: product.inventory_quantity,
+                vendor: product.vendor,
+                allFields: Object.keys(product)
+            });
+        }
+
         // Clean and format description
         const description = this.cleanDescription(product.body_html || product.title);
 
-        // Format price
-        const price = product.price ? `${parseFloat(product.price).toFixed(2)} USD` : '';
-        const salePrice = product.compare_at_price && parseFloat(product.compare_at_price) > parseFloat(product.price)
-            ? `${parseFloat(product.price).toFixed(2)} USD` : '';
+        // Format price - use compare_at_price as regular price if it exists
+        const regularPrice = product.compare_at_price ? parseFloat(product.compare_at_price) : parseFloat(product.price);
+        const currentPrice = parseFloat(product.price);
+
+        const price = regularPrice ? `${regularPrice.toFixed(2)} USD` : '';
+
+        // Sale price should only be set if there's actually a discount
+        const salePrice = (product.compare_at_price && currentPrice < regularPrice)
+            ? `${currentPrice.toFixed(2)} USD`
+            : '';
 
         // Determine availability
         const availability = this.getAvailability(product.inventory_quantity);
 
-        // Generate product URL
-        const link = `https://samee.myshopify.com/products/${product.handle}`;
+
+        let productHandle = product.handle || product.product_handle || '';
+        if (!productHandle && product.title) {
+            productHandle = product.title.toLowerCase()
+                .replace(/[^a-z0-9]/g, '-')
+                .replace(/-+/g, '-')
+                .replace(/^-|-$/g, '');
+        }
+
+        //shop URL and construct product link
+        const cleanShopUrl = shopUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
+        const link = productHandle
+            ? `https://${cleanShopUrl}/products/${productHandle}`
+            : `https://${cleanShopUrl}/products/product-${product.shopify_id}`;
 
         // Format images
         const imageLink = product.image_src || '';
@@ -243,7 +291,7 @@ class ExcelGenerator {
         // Format shipping weight
         const shippingWeight = product.weight ? `${product.weight} ${product.weight_unit || 'kg'}` : '';
 
-        // Generate intelligent custom labels for lowest-priced variants
+        // Generate intelligent custom labels with lowest variant analysis
         const customLabels = this.generateCustomLabels(product, analysis, lowestVariantAnalysis);
 
         return {
@@ -290,9 +338,9 @@ class ExcelGenerator {
         };
     }
 
-    generateCustomLabels(product, analysis, lowestVariantAnalysis) {
+    generateCustomLabels(product, analysis, lowestVariantAnalysis = null) {
         const labels = {
-            custom_label_0: '', // Lowest Variant Status (YOUR SPECIFIC REQUIREMENT)
+            custom_label_0: '', // Lowest Variant Status (if analysis provided) OR Price Tier (fallback)
             custom_label_1: '', // Competitive Position
             custom_label_2: '', // Inventory Status
             custom_label_3: '', // Vendor Performance
@@ -304,24 +352,32 @@ class ExcelGenerator {
         const vendor = product.vendor || 'Unknown';
         const productId = product.shopify_id;
 
-        // Custom Label 0: Lowest Variant Status (YOUR SPECIFIC REQUIREMENT)
-        if (lowestVariantAnalysis[productId]) {
+        // Custom Label 0: Lowest Variant Status (PREFERRED) or Price Tier (FALLBACK)
+        if (lowestVariantAnalysis && lowestVariantAnalysis[productId]) {
+            // Use lowest variant analysis (this is what you want for merchant feeds)
             const variantInfo = lowestVariantAnalysis[productId];
 
-            if (variantInfo.isLowestVariant) {
-                if (variantInfo.totalVariants > 1) {
-                    labels.custom_label_0 = 'Lowest_Variant';
-                } else {
-                    labels.custom_label_0 = 'Single_Variant'; // Only one variant available
-                }
+            if (variantInfo.isSingleVariant) {
+                labels.custom_label_0 = 'Single_Variant';
+            } else if (variantInfo.isLowestVariant) {
+                labels.custom_label_0 = 'Lowest_Variant';
             } else {
-                // This is a higher-priced variant
                 const priceDiffPercent = ((variantInfo.currentPrice - variantInfo.lowestPrice) / variantInfo.lowestPrice * 100).toFixed(0);
-                labels.custom_label_0 = `Higher_Variant_+${priceDiffPercent}%`;
+                // labels.custom_label_0 = `Higher_Variant_+${priceDiffPercent}%`;
+                labels.custom_label_0 = '';
             }
-        } else {
-            // Fallback for products not in variant analysis
+        } else if (lowestVariantAnalysis) {
+            // If analysis is provided but product not found, it's likely a single product
             labels.custom_label_0 = 'Single_Product';
+        } else {
+            // Fallback to price tiers if no variant analysis is provided
+            if (productPrice > 0 && analysis.priceRanges) {
+                Object.entries(analysis.priceRanges).forEach(([tier, range]) => {
+                    if (productPrice >= range.min && productPrice <= range.max) {
+                        labels.custom_label_0 = `Price_${range.label}`;
+                    }
+                });
+            }
         }
 
         // Custom Label 1: Competitive Position (for performance optimization)
@@ -384,11 +440,13 @@ class ExcelGenerator {
         let seasonalLabel = '';
 
         // Check for seasonal indicators
-        Object.entries(analysis.seasonalIndicators).forEach(([season, productIds]) => {
-            if (productIds.includes(productId)) {
-                seasonalLabel = this.capitalize(season);
-            }
-        });
+        if (analysis.seasonalIndicators) {
+            Object.entries(analysis.seasonalIndicators).forEach(([season, productIds]) => {
+                if (productIds.includes(productId)) {
+                    seasonalLabel = this.capitalize(season);
+                }
+            });
+        }
 
         // Special product attributes
         if (!seasonalLabel) {
@@ -398,7 +456,7 @@ class ExcelGenerator {
                 seasonalLabel = 'New_Arrival';
             } else if (product.tags && product.tags.toLowerCase().includes('bestseller')) {
                 seasonalLabel = 'Bestseller';
-            } else if (productPrice > 0 && analysis.priceRanges.luxury && productPrice >= analysis.priceRanges.luxury.min) {
+            } else if (productPrice > 0 && analysis.priceRanges && analysis.priceRanges.luxury && productPrice >= analysis.priceRanges.luxury.min) {
                 seasonalLabel = 'Luxury_Item';
             } else {
                 seasonalLabel = 'Standard';
@@ -410,9 +468,10 @@ class ExcelGenerator {
         return labels;
     }
 
+
     getCustomLabelsStats(products, analysis, lowestVariantAnalysis) {
         const stats = {
-            lowestVariants: {}, // New stats for Custom Label 0
+            lowestVariants: {}, // Updated stats for Custom Label 0
             competitivePositions: {},
             inventoryLevels: {},
             vendorCategories: {},
@@ -446,6 +505,15 @@ class ExcelGenerator {
             if (labels.custom_label_4) {
                 stats.seasonalAttributes[labels.custom_label_4] = (stats.seasonalAttributes[labels.custom_label_4] || 0) + 1;
             }
+        });
+
+        // Add summary logging
+        console.log('Custom Labels Statistics:', {
+            'Lowest Variants': stats.lowestVariants['Lowest_Variant'] || 0,
+            'Single Variants': stats.lowestVariants['Single_Variant'] || 0,
+            'Higher Variants': Object.entries(stats.lowestVariants)
+                .filter(([key]) => key.startsWith('Higher_Variant'))
+                .reduce((sum, [key, count]) => sum + count, 0)
         });
 
         return stats;
@@ -614,82 +682,10 @@ class ExcelGenerator {
         return seasonal;
     }
 
-    formatProductForGoogleMerchant(product, analysis) {
-        // Clean and format description
-        const description = this.cleanDescription(product.body_html || product.title);
 
-        // Format price
-        const price = product.price ? `${parseFloat(product.price).toFixed(2)} USD` : '';
-        const salePrice = product.compare_at_price && parseFloat(product.compare_at_price) > parseFloat(product.price)
-            ? `${parseFloat(product.price).toFixed(2)} USD` : '';
-
-        // Determine availability
-        const availability = this.getAvailability(product.inventory_quantity);
-
-        // Generate product URL
-        const link = `https://samee.myshopify.com/products/${product.handle}`;
-
-        // Format images
-        const imageLink = product.image_src || '';
-
-        // Extract variant attributes
-        const color = this.extractColor(product);
-        const size = this.extractSize(product);
-        const material = this.extractMaterial(product);
-
-        // Format shipping weight
-        const shippingWeight = product.weight ? `${product.weight} ${product.weight_unit || 'kg'}` : '';
-
-        // Generate intelligent custom labels for lowest-priced variants
-        const customLabels = this.generateCustomLabels(product, analysis);
-
-        return {
-            id: `${product.shopify_id}_${product.shopify_id}`, // product_id_variant_id format
-            title: this.truncateText(product.title, 150),
-            description: this.truncateText(description, 5000),
-            link: link,
-            image_link: imageLink,
-            additional_image_link: '', // Can be populated with additional product images
-            availability: availability,
-            price: price,
-            sale_price: salePrice,
-            brand: product.vendor || product.brand || '',
-            gtin: product.barcode || '',
-            mpn: product.sku || '',
-            condition: 'new',
-            adult: 'no',
-            multipack: '',
-            is_bundle: 'no',
-            age_group: '',
-            color: color,
-            gender: '',
-            material: material,
-            pattern: '',
-            size: size,
-            size_type: '',
-            size_system: '',
-            item_group_id: product.shopify_id, // Use product ID for grouping variants
-            google_product_category: product.google_product_category || '',
-            product_type: product.product_type || '',
-            shipping: '',
-            shipping_label: '',
-            shipping_weight: shippingWeight,
-            shipping_length: '',
-            shipping_width: '',
-            shipping_height: '',
-            tax: '',
-            tax_category: '',
-            custom_label_0: customLabels.custom_label_0,
-            custom_label_1: customLabels.custom_label_1,
-            custom_label_2: customLabels.custom_label_2,
-            custom_label_3: customLabels.custom_label_3,
-            custom_label_4: customLabels.custom_label_4
-        };
-    }
-
-    generateCustomLabels(product, analysis) {
+    generateCustomLabels(product, analysis, lowestVariantAnalysis = null) {
         const labels = {
-            custom_label_0: '', // Price Tier
+            custom_label_0: '', // Lowest Variant Status (if analysis provided) OR Price Tier (fallback)
             custom_label_1: '', // Competitive Position
             custom_label_2: '', // Inventory Status
             custom_label_3: '', // Vendor Performance
@@ -701,13 +697,32 @@ class ExcelGenerator {
         const vendor = product.vendor || 'Unknown';
         const productId = product.shopify_id;
 
-        // Custom Label 0: Price Tier (for bidding strategies)
-        if (productPrice > 0 && analysis.priceRanges) {
-            Object.entries(analysis.priceRanges).forEach(([tier, range]) => {
-                if (productPrice >= range.min && productPrice <= range.max) {
-                    labels.custom_label_0 = `Price_${range.label}`;
-                }
-            });
+        // Custom Label 0: Lowest Variant Status (PREFERRED) or Price Tier (FALLBACK)
+        if (lowestVariantAnalysis && lowestVariantAnalysis[productId]) {
+            // Use lowest variant analysis (this is what you want for merchant feeds)
+            const variantInfo = lowestVariantAnalysis[productId];
+
+            if (variantInfo.isSingleVariant) {
+                labels.custom_label_0 = 'Single_Variant';
+            } else if (variantInfo.isLowestVariant) {
+                labels.custom_label_0 = 'Lowest_Variant';
+            } else {
+                const priceDiffPercent = ((variantInfo.currentPrice - variantInfo.lowestPrice) / variantInfo.lowestPrice * 100).toFixed(0);
+                //labels.custom_label_0 = `Higher_Variant_+${priceDiffPercent}%`;
+                labels.custom_label_0 = '';
+            }
+        } else if (lowestVariantAnalysis) {
+            // If analysis is provided but product not found, it's likely a single product
+            labels.custom_label_0 = 'Single_Product';
+        } else {
+            // Fallback to price tiers if no variant analysis is provided
+            if (productPrice > 0 && analysis.priceRanges) {
+                Object.entries(analysis.priceRanges).forEach(([tier, range]) => {
+                    if (productPrice >= range.min && productPrice <= range.max) {
+                        labels.custom_label_0 = `Price_${range.label}`;
+                    }
+                });
+            }
         }
 
         // Custom Label 1: Competitive Position (for performance optimization)
@@ -770,11 +785,13 @@ class ExcelGenerator {
         let seasonalLabel = '';
 
         // Check for seasonal indicators
-        Object.entries(analysis.seasonalIndicators).forEach(([season, productIds]) => {
-            if (productIds.includes(productId)) {
-                seasonalLabel = this.capitalize(season);
-            }
-        });
+        if (analysis.seasonalIndicators) {
+            Object.entries(analysis.seasonalIndicators).forEach(([season, productIds]) => {
+                if (productIds.includes(productId)) {
+                    seasonalLabel = this.capitalize(season);
+                }
+            });
+        }
 
         // Special product attributes
         if (!seasonalLabel) {
@@ -784,7 +801,7 @@ class ExcelGenerator {
                 seasonalLabel = 'New_Arrival';
             } else if (product.tags && product.tags.toLowerCase().includes('bestseller')) {
                 seasonalLabel = 'Bestseller';
-            } else if (productPrice > 0 && analysis.priceRanges.luxury && productPrice >= analysis.priceRanges.luxury.min) {
+            } else if (productPrice > 0 && analysis.priceRanges && analysis.priceRanges.luxury && productPrice >= analysis.priceRanges.luxury.min) {
                 seasonalLabel = 'Luxury_Item';
             } else {
                 seasonalLabel = 'Standard';
@@ -795,22 +812,23 @@ class ExcelGenerator {
 
         return labels;
     }
-
-    getCustomLabelsStats(products, analysis) {
+    getCustomLabelsStats(products, analysis, lowestVariantAnalysis) {
         const stats = {
-            priceTiers: {},
+            lowestVariants: {}, // Updated stats for Custom Label 0
             competitivePositions: {},
             inventoryLevels: {},
             vendorCategories: {},
             seasonalAttributes: {}
         };
 
-        products.forEach(product => {
-            const labels = this.generateCustomLabels(product, analysis);
+        console.log('getCustomLabelsStats called with', products.length, 'products');
 
-            // Count price tiers
+        products.forEach(product => {
+            const labels = this.generateCustomLabels(product, analysis, lowestVariantAnalysis);
+
+            // Count lowest variant status (Custom Label 0)
             if (labels.custom_label_0) {
-                stats.priceTiers[labels.custom_label_0] = (stats.priceTiers[labels.custom_label_0] || 0) + 1;
+                stats.lowestVariants[labels.custom_label_0] = (stats.lowestVariants[labels.custom_label_0] || 0) + 1;
             }
 
             // Count competitive positions
@@ -832,6 +850,15 @@ class ExcelGenerator {
             if (labels.custom_label_4) {
                 stats.seasonalAttributes[labels.custom_label_4] = (stats.seasonalAttributes[labels.custom_label_4] || 0) + 1;
             }
+        });
+
+        // Add summary logging
+        console.log('Custom Labels Statistics:', {
+            'Lowest Variants': stats.lowestVariants['Lowest_Variant'] || 0,
+            'Single Variants': stats.lowestVariants['Single_Variant'] || 0,
+            'Higher Variants': Object.entries(stats.lowestVariants)
+                .filter(([key]) => key.startsWith('Higher_Variant'))
+                .reduce((sum, [key, count]) => sum + count, 0)
         });
 
         return stats;

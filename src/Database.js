@@ -424,6 +424,21 @@ class Database {
         return await this.allQuery(query, params);
     }
 
+    async getShopDomain() {
+        try {
+            const result = await this.getQuery('SELECT value FROM configuration WHERE key = ?', ['shop_domain']);
+            return result?.value || 'samee.myshopify.com'; // fallback to current
+        } catch (error) {
+            console.error('Error getting shop domain:', error);
+            return 'samee.myshopify.com'; // fallback
+        }
+    }
+
+    async setShopDomain(domain) {
+        const query = `INSERT OR REPLACE INTO configuration (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)`;
+        return await this.runQuery(query, ['shop_domain', domain]);
+    }
+
     async logSync(syncData) {
         const query = `
       INSERT INTO sync_logs (

@@ -9,6 +9,7 @@ data/
 .env.local
 .env.*.local
 
+exports/
 # VS Code settings
 .vscode/
 

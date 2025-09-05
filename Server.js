@@ -130,6 +130,9 @@ app.get('/api/products/stats', async (req, res) => {
 
 // Excel generation endpoints
 app.post('/api/generate-excel', async (req, res) => {
+    req.setTimeout(300000); // 5 minutes
+    res.setTimeout(300000); // 5 minutes
+
     try {
         const { filters = {} } = req.body;
         const result = await excelGenerator.generateFeed(filters, database);
