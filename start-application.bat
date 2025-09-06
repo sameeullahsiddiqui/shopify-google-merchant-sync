@@ -48,7 +48,7 @@ echo The application will open in your default browser.
 echo Press Ctrl+C to stop the application.
 echo.
 
-start "" "http://localhost:3001"
+@REM start "" "http://localhost:3001/api/status"
 npm run dev
 
 pause
