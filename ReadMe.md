@@ -13,6 +13,13 @@ A comprehensive Node.js application that automates Google Merchant Center feed g
 - **Error Recovery**: Comprehensive error handling and retry logic
 - **Azure Ready**: Prepared for cloud deployment
 
+## Screenshots
+![Setup Page](docs/images/setup-page.png)
+![Setup Page 2](docs/images/setup-page-1.png)
+![Dashboard](docs/images/dashboard.png)
+![Export](docs/images/export.png)
+![Settings](docs/images/Settings.png)
+
 ## 📋 Prerequisites
 
 - Node.js 18+ and npm
